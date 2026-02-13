@@ -1,0 +1,46 @@
+VERIFICAÇÃO DO PYTHON
+	python --version
+Verifica a versão instalada do Python.
+	pip --version
+Verifica se o gerenciador de pacotes (pip) está funcionando.
+
+CRIAÇÃO DO PROJETO
+	mkdir pcm_bot
+Cria a pasta do projeto.
+	cd pcm_bot
+Entra na pasta do projeto.
+
+CRIAÇÃO DO AMBIENTE VIRTUAL
+	python -m venv .venv
+Cria um ambiente virtual isolado chamado .venv.
+
+ATIVAÇÃO DO AMBIENTE VIRTUAL (PowerShell)
+	Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass.\.venv\Scripts\Activate.ps1
+Permite executar scripts nesta sessão do PowerShell.Ativa o (.venv)
+
+INSTALAÇÃO DAS DEPENDÊNCIAS
+	pip install -r requirements.txt
+Instala todas as bibliotecas listadas no arquivo requirements.txt.
+	pip list
+Lista as bibliotecas instaladas no ambiente virtual.
+	python -m pip install --upgrade pip
+Atualiza o pip (opcional).
+
+EXECUÇÃO DO SERVIDOR FASTAPI
+	python -m uvicorn app:app --reload
+Inicia o servidor FastAPI na porta 8000.
+
+
+NGROK (EXPOSIÇÃO DO SERVIDOR)
+	ngrok config add-authtoken SEU_TOKEN
+Autentica sua conta ngrok.
+	ngrok http 8000
+Cria um túnel público para a porta 8000. Gera uma URL pública como: https://xxxx.ngrok-free.dev
+
+REGISTRO DO WEBHOOK NO TELEGRAM (PowerShell)
+	Invoke-RestMethod -Method Post -Uri "https://api.telegram.org/bot8582565589:AAEUFdZA3hRwfH656UbakQaywTMuJDEJtRA/setWebhook" -Body @{url="https://september-virescent-unmercifully.ngrok-free.dev/telegram/webhook"}
+Registra seu endpoint como webhook do Telegram.
+
+PARAR SERVIDOR OU NGROK
+	Ctrl + C
+Interrompe execução do servidor ou ngrok.
