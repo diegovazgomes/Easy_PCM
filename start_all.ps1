@@ -90,3 +90,4 @@ if (-not $setOk) { throw "Falha ao configurar webhook no Telegram após retries.
 
 Write-Host "Webhook configurado com sucesso."
 Write-Host "Tudo iniciado. Servidor + ngrok rodando e webhook atualizado."
+
