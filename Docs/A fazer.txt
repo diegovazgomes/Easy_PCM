@@ -1,0 +1,6 @@
+* No telegram criar um menu, com abrir, fechar e consultar OS
+    *Em abrir, pode apenas inserir, solicitante, departamento, equipamento/local, serviço solicitado, máquina parada?
+    *Em fechar, pode apenas inserir, descrição do serviço executado, material utilizado, valor do material, hora de inicio e término, nome do técnico
+*Permitir + de 1 técnico por OS
+*Criar mapa de TAGS, nomes de técnico, setores e afins
+* Através do telegram, buscar OS e modificar algum dado. EX: Buscar OS 4 e mudar status

@@ -44,3 +44,8 @@ Registra seu endpoint como webhook do Telegram.
 PARAR SERVIDOR OU NGROK
 	Ctrl + C
 Interrompe execução do servidor ou ngrok.
+
+CRIAR COMMIT
+	git add .
+	git commit -m "cleanup: remove ai.py antigo da raiz"
+	git push
