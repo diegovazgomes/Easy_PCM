@@ -1,13 +1,21 @@
 from .schemas import WorkOrder, SEM_INFO
 
+
+def format_title(text: str) -> str:
+    """Capitaliza corretamente cada palavra, tratando valores nulos."""
+    if not text or text == SEM_INFO:
+        return text
+    return text.title()
+
+
 def format_os_message(wo: WorkOrder, os_id: int) -> str:
-    equipamento = wo.equipamento
-    setor = wo.setor
-    solicitante = wo.solicitante
-    executor = wo.executor
+    equipamento = format_title(wo.equipamento)
+    setor = format_title(wo.setor)
+    solicitante = format_title(wo.solicitante)
+    executor = format_title(wo.executor)
     descricao = wo.descrição_do_problema
-    tipo = wo.tipo_manutenção
-    status = wo.status
+    tipo = format_title(wo.tipo_manutenção)
+    status = format_title(wo.status)
     tempo = wo.tempo_gasto_minutos
     custo = wo.custo_peças
     solucao = wo.solução_aplicada
@@ -22,7 +30,8 @@ def format_os_message(wo: WorkOrder, os_id: int) -> str:
         f"📌 Status: {status}\n"
         f"⏱ Tempo gasto (min): {tempo}\n"
         f"💰 Custo de peças: {custo}\n"
-        f"🚨 Problema detectado:{descricao}\n"
-        f"🛠 Solução aplicada:{solucao}"
+        f"🚨 Problema detectado: {descricao}\n"
+        f"🛠 Solução aplicada: {solucao}"
     )
+
     return msg
