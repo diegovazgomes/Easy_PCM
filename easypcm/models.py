@@ -54,6 +54,21 @@ class MaterialRow(Base):
     created_at: Mapped[str] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class TechnicianRow(Base):
+    __tablename__ = "technicians"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    nome: Mapped[str] = mapped_column(String, unique=True, index=True)
+
+
+class WorkOrderTechnicianRow(Base):
+    __tablename__ = "work_order_technicians"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    work_order_id: Mapped[int] = mapped_column(Integer, ForeignKey("work_orders.id"), index=True)
+    technician_id: Mapped[int] = mapped_column(Integer, ForeignKey("technicians.id"), index=True)
+
+
 class ChatState(Base):
     __tablename__ = "chat_states"
 

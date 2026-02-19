@@ -12,6 +12,8 @@ from easypcm.repository import (
     close_work_order,
     add_materials,
     list_materials,
+    add_technicians_to_os,
+    list_technicians_for_os,
 )
 
 app = FastAPI()
@@ -79,15 +81,18 @@ def _safe_float_string(text: str) -> str:
 
 
 def _parse_materials_list(text: str) -> list[str]:
-    """
-    Entrada esperada:
-      - "rolamento 6204, retentor 45mm, graxa"
-      - "NENHUMA"
-    """
     t = (text or "").strip()
     if not t:
         return []
     if t.upper() in ("NENHUMA", "NENHUM", "NAO", "NÃO"):
+        return []
+    parts = [p.strip() for p in t.split(",")]
+    return [p for p in parts if p]
+
+
+def _parse_technicians_list(text: str) -> list[str]:
+    t = (text or "").strip()
+    if not t:
         return []
     parts = [p.strip() for p in t.split(",")]
     return [p for p in parts if p]
@@ -271,6 +276,7 @@ async def telegram_webhook(request: Request):
                 st.temp_tecnicos = text
                 db.commit()
                 set_state(db, st, mode="CLOSE_FLOW", step="ASK_MATERIAIS", os_id=os_id)
+
                 send_message(
                     chat_id,
                     "Informe as peças utilizadas (separe por vírgula).\n"
@@ -284,6 +290,7 @@ async def telegram_webhook(request: Request):
                 st.temp_materiais = text
                 db.commit()
                 set_state(db, st, mode="CLOSE_FLOW", step="ASK_CUSTO", os_id=os_id)
+
                 send_message(
                     chat_id,
                     "Informe o custo de peças (opcional). Pode ser 0. Ex: 50,30\n"
@@ -311,6 +318,12 @@ async def telegram_webhook(request: Request):
                             fim_min += 24 * 60
                         tempo_min = max(0, fim_min - inicio_min)
 
+                # salvar técnicos N:N
+                tech_names = _parse_technicians_list(st.temp_tecnicos)
+                saved_techs = []
+                if tech_names:
+                    saved_techs = add_technicians_to_os(db, os_id, tech_names)
+
                 # salvar materiais
                 materiais = _parse_materials_list(st.temp_materiais)
                 if materiais:
@@ -326,7 +339,11 @@ async def telegram_webhook(request: Request):
                     custo_pecas=st.temp_custo_pecas,
                 )
 
-                # listar materiais para mostrar no resumo (limite)
+                # lista técnicos do DB
+                techs_db = list_technicians_for_os(db, os_id)
+                tecnicos_txt = ", ".join(techs_db) if techs_db else "SEM INFORMAÇÃO"
+
+                # listar materiais para mostrar no resumo
                 mats = list_materials(db, os_id)
                 if mats:
                     mats_txt = ", ".join([m.descricao for m in mats[:6]])
@@ -335,7 +352,6 @@ async def telegram_webhook(request: Request):
                 else:
                     mats_txt = "NENHUMA"
 
-                tecnicos = st.temp_tecnicos.strip() if st.temp_tecnicos.strip() else "SEM INFORMAÇÃO"
                 clear_state(db, st)
 
                 send_message(
@@ -344,7 +360,7 @@ async def telegram_webhook(request: Request):
                     f"Equipamento: {wo.equipamento}\n"
                     f"Setor: {wo.setor}\n"
                     f"Tempo (min): {wo.tempo_gasto_minutos}\n"
-                    f"Técnicos: {tecnicos}\n"
+                    f"Técnicos: {tecnicos_txt}\n"
                     f"Peças: {mats_txt}\n"
                     f"Custo peças: {wo.custo_pecas}\n"
                     f"Solução: {wo.solucao_aplicada}",

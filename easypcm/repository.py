@@ -2,7 +2,13 @@ from sqlalchemy.orm import Session
 from sqlalchemy import desc
 from datetime import datetime, timezone
 
-from .models import ChatState, WorkOrderRow, MaterialRow
+from .models import (
+    ChatState,
+    WorkOrderRow,
+    MaterialRow,
+    TechnicianRow,
+    WorkOrderTechnicianRow,
+)
 from .schemas import SEM_INFO
 
 
@@ -91,9 +97,6 @@ def get_work_order(db: Session, chat_id: str, os_id: int) -> WorkOrderRow | None
 
 
 def add_materials(db: Session, os_id: int, materiais: list[str]) -> None:
-    """
-    Cria 1 linha por material em materials.
-    """
     for m in materiais:
         desc_txt = (m or "").strip()
         if not desc_txt:
@@ -110,6 +113,70 @@ def list_materials(db: Session, os_id: int) -> list[MaterialRow]:
         .order_by(desc(MaterialRow.id))
         .all()
     )
+
+
+def _get_or_create_technician(db: Session, nome: str) -> TechnicianRow:
+    nome_norm = (nome or "").strip()
+    if not nome_norm:
+        # não cria vazio
+        raise ValueError("Nome de técnico vazio.")
+
+    # padrão simples: capitaliza primeiras letras (ajuda um pouco)
+    # (no futuro: mapa de nomes/sinônimos)
+    nome_norm = " ".join([p[:1].upper() + p[1:].lower() for p in nome_norm.split()])
+
+    tech = db.query(TechnicianRow).filter(TechnicianRow.nome == nome_norm).first()
+    if tech:
+        return tech
+
+    tech = TechnicianRow(nome=nome_norm)
+    db.add(tech)
+    db.commit()
+    db.refresh(tech)
+    return tech
+
+
+def add_technicians_to_os(db: Session, os_id: int, nomes: list[str]) -> list[str]:
+    """
+    Cria técnicos se necessário e cria vínculo OS <-> técnico.
+    Retorna a lista de nomes normalizados gravados.
+    """
+    saved_names: list[str] = []
+
+    for nome in nomes:
+        nome_clean = (nome or "").strip()
+        if not nome_clean:
+            continue
+
+        tech = _get_or_create_technician(db, nome_clean)
+
+        # evitar duplicado
+        exists = (
+            db.query(WorkOrderTechnicianRow)
+            .filter(
+                WorkOrderTechnicianRow.work_order_id == os_id,
+                WorkOrderTechnicianRow.technician_id == tech.id,
+            )
+            .first()
+        )
+        if not exists:
+            db.add(WorkOrderTechnicianRow(work_order_id=os_id, technician_id=tech.id))
+
+        saved_names.append(tech.nome)
+
+    db.commit()
+    return saved_names
+
+
+def list_technicians_for_os(db: Session, os_id: int) -> list[str]:
+    rows = (
+        db.query(TechnicianRow.nome)
+        .join(WorkOrderTechnicianRow, WorkOrderTechnicianRow.technician_id == TechnicianRow.id)
+        .filter(WorkOrderTechnicianRow.work_order_id == os_id)
+        .order_by(TechnicianRow.nome.asc())
+        .all()
+    )
+    return [r[0] for r in rows]
 
 
 def close_work_order(
