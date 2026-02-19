@@ -2,7 +2,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import desc
 from datetime import datetime, timezone
 
-from .models import ChatState, WorkOrderRow
+from .models import ChatState, WorkOrderRow, MaterialRow
 from .schemas import SEM_INFO
 
 
@@ -41,6 +41,7 @@ def clear_state(db: Session, st: ChatState) -> ChatState:
     st.temp_inicio_hhmm = ""
     st.temp_fim_hhmm = ""
     st.temp_tecnicos = ""
+    st.temp_materiais = ""
     st.temp_custo_pecas = ""
 
     db.commit()
@@ -86,6 +87,28 @@ def get_work_order(db: Session, chat_id: str, os_id: int) -> WorkOrderRow | None
         db.query(WorkOrderRow)
         .filter(WorkOrderRow.chat_id == chat_id, WorkOrderRow.id == os_id)
         .first()
+    )
+
+
+def add_materials(db: Session, os_id: int, materiais: list[str]) -> None:
+    """
+    Cria 1 linha por material em materials.
+    """
+    for m in materiais:
+        desc_txt = (m or "").strip()
+        if not desc_txt:
+            continue
+        row = MaterialRow(work_order_id=os_id, descricao=desc_txt)
+        db.add(row)
+    db.commit()
+
+
+def list_materials(db: Session, os_id: int) -> list[MaterialRow]:
+    return (
+        db.query(MaterialRow)
+        .filter(MaterialRow.work_order_id == os_id)
+        .order_by(desc(MaterialRow.id))
+        .all()
     )
 
 

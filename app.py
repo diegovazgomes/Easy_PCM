@@ -1,5 +1,4 @@
 from fastapi import FastAPI, Request
-from datetime import datetime
 
 from easypcm.db import engine, SessionLocal
 from easypcm.models import Base
@@ -11,6 +10,8 @@ from easypcm.repository import (
     create_open_work_order,
     list_open_work_orders,
     close_work_order,
+    add_materials,
+    list_materials,
 )
 
 app = FastAPI()
@@ -32,10 +33,6 @@ def _normalize_text(t: str) -> str:
 
 
 def _parse_hhmm(text: str) -> int | None:
-    """
-    Converte 'HH:MM' -> minutos desde 00:00.
-    Retorna None se inválido.
-    """
     t = text.strip()
     if ":" not in t:
         return None
@@ -53,43 +50,23 @@ def _parse_hhmm(text: str) -> int | None:
 
 
 def _parse_total_duration_minutes(text: str) -> int | None:
-    """
-    Aceita:
-      - 'TOTAL 2h'
-      - 'TOTAL 2 horas'
-      - 'TOTAL 120'  (minutos)
-      - '2h', '2 horas', '120'
-    Retorna minutos (int) ou None.
-    """
     t = text.strip().lower()
-
     if t.startswith("total"):
         t = t.replace("total", "", 1).strip()
 
-    # só número -> minutos
     if t.isdigit():
         return int(t)
 
-    # formatos com "h"
-    # exemplos: "2h", "2 h", "2 horas"
     t = t.replace("horas", "h").replace("hora", "h")
     t = t.replace(" ", "")
-
     if t.endswith("h"):
         num = t[:-1]
         if num.isdigit():
             return int(num) * 60
-
     return None
 
 
 def _safe_float_string(text: str) -> str:
-    """
-    Recebe custo como texto e tenta padronizar.
-    Aceita '50,30' -> '50.30'
-    Se vazio -> 'SEM INFORMAÇÃO'
-    Se inválido -> mantém como texto original.
-    """
     t = (text or "").strip()
     if not t:
         return "SEM INFORMAÇÃO"
@@ -99,6 +76,21 @@ def _safe_float_string(text: str) -> str:
         return t2
     except ValueError:
         return t
+
+
+def _parse_materials_list(text: str) -> list[str]:
+    """
+    Entrada esperada:
+      - "rolamento 6204, retentor 45mm, graxa"
+      - "NENHUMA"
+    """
+    t = (text or "").strip()
+    if not t:
+        return []
+    if t.upper() in ("NENHUMA", "NENHUM", "NAO", "NÃO"):
+        return []
+    parts = [p.strip() for p in t.split(",")]
+    return [p for p in parts if p]
 
 
 @app.post("/telegram/webhook")
@@ -119,13 +111,10 @@ async def telegram_webhook(request: Request):
 
             if data.startswith("close:"):
                 os_id = int(data.split(":", 1)[1])
-
                 set_state(db, st, mode="CLOSE_FLOW", step="ASK_SOLUCAO", os_id=os_id)
-
                 send_message(
                     chat_id,
-                    f"Ok. Vamos fechar a OS #{os_id}.\n\n"
-                    f"Descreva o serviço executado / solução aplicada:",
+                    f"Ok. Vamos fechar a OS #{os_id}.\n\nDescreva o serviço executado / solução aplicada:",
                     reply_markup=menu,
                 )
             else:
@@ -133,7 +122,7 @@ async def telegram_webhook(request: Request):
 
             return {"ok": True}
 
-        # 2) MESSAGE (texto normal / comandos / botões fixos)
+        # 2) MESSAGE
         message = update.get("message") or update.get("edited_message")
         if not message:
             return {"ok": True}
@@ -143,7 +132,7 @@ async def telegram_webhook(request: Request):
 
         st = get_or_create_chat_state(db, chat_id)
 
-        # --- Comandos / Menu ---
+        # --- Menu / Comandos ---
         if text in ("/opcoes", "/opções", "/menu", "Consultar OS"):
             send_message(chat_id, "Menu:", reply_markup=menu)
             return {"ok": True}
@@ -167,7 +156,7 @@ async def telegram_webhook(request: Request):
             send_message(chat_id, "Selecione a OS para fechar:", reply_markup=close_os_inline_keyboard(items))
             return {"ok": True}
 
-        # --- Fluxo de ABERTURA ---
+        # --- ABERTURA ---
         if st.mode == "OPEN_FLOW":
             if st.step == "ASK_EQUIP":
                 st.temp_equipamento = text
@@ -227,7 +216,7 @@ async def telegram_webhook(request: Request):
                 )
                 return {"ok": True}
 
-        # --- Fluxo de FECHAMENTO COMPLETO ---
+        # --- FECHAMENTO ---
         if st.mode == "CLOSE_FLOW":
             os_id = st.os_id
 
@@ -246,29 +235,15 @@ async def telegram_webhook(request: Request):
                 return {"ok": True}
 
             if st.step == "ASK_INICIO":
-                # opção: total direto
                 total_min = _parse_total_duration_minutes(text)
                 if total_min is not None:
-                    st.temp_inicio_hhmm = ""
+                    st.temp_inicio_hhmm = f"TOTAL:{total_min}"
                     st.temp_fim_hhmm = ""
                     db.commit()
-
-                    # guarda o total direto em tempo_gasto_minutos (vamos passar mais tarde)
-                    # segue para técnicos
                     set_state(db, st, mode="CLOSE_FLOW", step="ASK_TECNICOS", os_id=os_id)
-                    # guardaremos o total no campo temp_fim_hhmm usando um truque simples? melhor não.
-                    # vamos usar temp_inicio_hhmm = f"TOTAL:{min}"
-                    st.temp_inicio_hhmm = f"TOTAL:{total_min}"
-                    db.commit()
-
-                    send_message(
-                        chat_id,
-                        "Informe o(s) técnico(s) (separe por vírgula se tiver mais de um). Ex: Marcos, João",
-                        reply_markup=menu,
-                    )
+                    send_message(chat_id, "Informe o(s) técnico(s) (ex: Marcos, João):", reply_markup=menu)
                     return {"ok": True}
 
-                # senão, esperar HH:MM
                 inicio_min = _parse_hhmm(text)
                 if inicio_min is None:
                     send_message(chat_id, "Formato inválido. Envie HH:MM (ex: 08:10) ou TOTAL 3h:", reply_markup=menu)
@@ -289,15 +264,24 @@ async def telegram_webhook(request: Request):
                 st.temp_fim_hhmm = text
                 db.commit()
                 set_state(db, st, mode="CLOSE_FLOW", step="ASK_TECNICOS", os_id=os_id)
-                send_message(
-                    chat_id,
-                    "Informe o(s) técnico(s) (separe por vírgula se tiver mais de um). Ex: Marcos, João",
-                    reply_markup=menu,
-                )
+                send_message(chat_id, "Informe o(s) técnico(s) (ex: Marcos, João):", reply_markup=menu)
                 return {"ok": True}
 
             if st.step == "ASK_TECNICOS":
                 st.temp_tecnicos = text
+                db.commit()
+                set_state(db, st, mode="CLOSE_FLOW", step="ASK_MATERIAIS", os_id=os_id)
+                send_message(
+                    chat_id,
+                    "Informe as peças utilizadas (separe por vírgula).\n"
+                    "Ex: rolamento 6204, retentor 45mm, graxa\n"
+                    "Se não houve peças, digite: NENHUMA",
+                    reply_markup=menu,
+                )
+                return {"ok": True}
+
+            if st.step == "ASK_MATERIAIS":
+                st.temp_materiais = text
                 db.commit()
                 set_state(db, st, mode="CLOSE_FLOW", step="ASK_CUSTO", os_id=os_id)
                 send_message(
@@ -309,35 +293,30 @@ async def telegram_webhook(request: Request):
                 return {"ok": True}
 
             if st.step == "ASK_CUSTO":
-                custo = _safe_float_string(text)
-                st.temp_custo_pecas = custo
+                st.temp_custo_pecas = _safe_float_string(text)
                 db.commit()
 
                 # calcular tempo em minutos
-                tempo_min = None
-
-                # caso TOTAL
+                tempo_min = 0
                 if st.temp_inicio_hhmm.startswith("TOTAL:"):
                     try:
                         tempo_min = int(st.temp_inicio_hhmm.split(":", 1)[1])
                     except Exception:
-                        tempo_min = None
+                        tempo_min = 0
                 else:
                     inicio_min = _parse_hhmm(st.temp_inicio_hhmm)
                     fim_min = _parse_hhmm(st.temp_fim_hhmm)
-
-                    if inicio_min is None or fim_min is None:
-                        tempo_min = None
-                    else:
-                        # se cruzou meia-noite, soma 24h
+                    if inicio_min is not None and fim_min is not None:
                         if fim_min < inicio_min:
                             fim_min += 24 * 60
-                        tempo_min = fim_min - inicio_min
+                        tempo_min = max(0, fim_min - inicio_min)
 
-                if tempo_min is None:
-                    tempo_min = 0
+                # salvar materiais
+                materiais = _parse_materials_list(st.temp_materiais)
+                if materiais:
+                    add_materials(db, os_id, materiais)
 
-                # Fechar no banco
+                # fechar OS
                 wo = close_work_order(
                     db,
                     chat_id=chat_id,
@@ -347,9 +326,16 @@ async def telegram_webhook(request: Request):
                     custo_pecas=st.temp_custo_pecas,
                 )
 
-                # OBS: por enquanto técnicos ficam apenas na conversa (não salvamos no DB ainda).
-                tecnicos = st.temp_tecnicos.strip() if st.temp_tecnicos.strip() else "SEM INFORMAÇÃO"
+                # listar materiais para mostrar no resumo (limite)
+                mats = list_materials(db, os_id)
+                if mats:
+                    mats_txt = ", ".join([m.descricao for m in mats[:6]])
+                    if len(mats) > 6:
+                        mats_txt += "..."
+                else:
+                    mats_txt = "NENHUMA"
 
+                tecnicos = st.temp_tecnicos.strip() if st.temp_tecnicos.strip() else "SEM INFORMAÇÃO"
                 clear_state(db, st)
 
                 send_message(
@@ -358,14 +344,14 @@ async def telegram_webhook(request: Request):
                     f"Equipamento: {wo.equipamento}\n"
                     f"Setor: {wo.setor}\n"
                     f"Tempo (min): {wo.tempo_gasto_minutos}\n"
-                    f"Custo peças: {wo.custo_pecas}\n"
                     f"Técnicos: {tecnicos}\n"
+                    f"Peças: {mats_txt}\n"
+                    f"Custo peças: {wo.custo_pecas}\n"
                     f"Solução: {wo.solucao_aplicada}",
                     reply_markup=menu,
                 )
                 return {"ok": True}
 
-        # fallback
         send_message(chat_id, "Comando não reconhecido. Use o menu.", reply_markup=menu)
         return {"ok": True}
 
