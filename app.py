@@ -1,22 +1,19 @@
 from fastapi import FastAPI, Request
-from openai import OpenAI
-import json
-
-from easypcm.config import OPENAI_API_KEY
-from easypcm.telegram import send_message
-from easypcm.ai import extrair_os
-from easypcm.formatters import format_os_message
-from easypcm.schemas import WorkOrder
+from datetime import datetime
 
 from easypcm.db import engine, SessionLocal
 from easypcm.models import Base
-from easypcm.repository import event_exists, save_event, save_work_order
-
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
+from easypcm.telegram import send_message, main_menu_keyboard, close_os_inline_keyboard
+from easypcm.repository import (
+    get_or_create_chat_state,
+    set_state,
+    clear_state,
+    create_open_work_order,
+    list_open_work_orders,
+    close_work_order,
+)
 
 app = FastAPI()
-
-# Cria as tabelas no primeiro start (para MVP é suficiente)
 Base.metadata.create_all(bind=engine)
 
 
@@ -30,52 +27,347 @@ def home():
     return {"status": "Servidor rodando"}
 
 
+def _normalize_text(t: str) -> str:
+    return (t or "").strip()
+
+
+def _parse_hhmm(text: str) -> int | None:
+    """
+    Converte 'HH:MM' -> minutos desde 00:00.
+    Retorna None se inválido.
+    """
+    t = text.strip()
+    if ":" not in t:
+        return None
+    parts = t.split(":")
+    if len(parts) != 2:
+        return None
+    try:
+        hh = int(parts[0])
+        mm = int(parts[1])
+    except ValueError:
+        return None
+    if hh < 0 or hh > 23 or mm < 0 or mm > 59:
+        return None
+    return hh * 60 + mm
+
+
+def _parse_total_duration_minutes(text: str) -> int | None:
+    """
+    Aceita:
+      - 'TOTAL 2h'
+      - 'TOTAL 2 horas'
+      - 'TOTAL 120'  (minutos)
+      - '2h', '2 horas', '120'
+    Retorna minutos (int) ou None.
+    """
+    t = text.strip().lower()
+
+    if t.startswith("total"):
+        t = t.replace("total", "", 1).strip()
+
+    # só número -> minutos
+    if t.isdigit():
+        return int(t)
+
+    # formatos com "h"
+    # exemplos: "2h", "2 h", "2 horas"
+    t = t.replace("horas", "h").replace("hora", "h")
+    t = t.replace(" ", "")
+
+    if t.endswith("h"):
+        num = t[:-1]
+        if num.isdigit():
+            return int(num) * 60
+
+    return None
+
+
+def _safe_float_string(text: str) -> str:
+    """
+    Recebe custo como texto e tenta padronizar.
+    Aceita '50,30' -> '50.30'
+    Se vazio -> 'SEM INFORMAÇÃO'
+    Se inválido -> mantém como texto original.
+    """
+    t = (text or "").strip()
+    if not t:
+        return "SEM INFORMAÇÃO"
+    t2 = t.replace(",", ".")
+    try:
+        float(t2)
+        return t2
+    except ValueError:
+        return t
+
+
 @app.post("/telegram/webhook")
 async def telegram_webhook(request: Request):
     update = await request.json()
-
-    message = update.get("message") or update.get("edited_message")
-    if not message:
-        return {"ok": True}
-
-    chat_id = str(message["chat"]["id"])
-    message_id = str(message.get("message_id", ""))
-
-    # Por enquanto: só texto
-    if "text" not in message:
-        send_message(chat_id, "Por enquanto eu processo apenas texto. Áudio entra no próximo passo.")
-        return {"ok": True}
-
-    texto = message["text"]
-    raw_update = json.dumps(update, ensure_ascii=False)
-
     db = SessionLocal()
+
     try:
-        # Idempotência: se o Telegram reenviar o mesmo message_id, ignorar
-        if message_id and event_exists(db, message_id):
+        menu = main_menu_keyboard()
+
+        # 1) CALLBACK (clique em botão inline)
+        if "callback_query" in update:
+            cb = update["callback_query"]
+            chat_id = str(cb["message"]["chat"]["id"])
+            data = cb.get("data", "")
+
+            st = get_or_create_chat_state(db, chat_id)
+
+            if data.startswith("close:"):
+                os_id = int(data.split(":", 1)[1])
+
+                set_state(db, st, mode="CLOSE_FLOW", step="ASK_SOLUCAO", os_id=os_id)
+
+                send_message(
+                    chat_id,
+                    f"Ok. Vamos fechar a OS #{os_id}.\n\n"
+                    f"Descreva o serviço executado / solução aplicada:",
+                    reply_markup=menu,
+                )
+            else:
+                send_message(chat_id, "Ação não reconhecida.", reply_markup=menu)
+
             return {"ok": True}
 
-        # Salva evento bruto + texto
-        if message_id:
-            save_event(db, message_id, chat_id, raw_update, texto)
+        # 2) MESSAGE (texto normal / comandos / botões fixos)
+        message = update.get("message") or update.get("edited_message")
+        if not message:
+            return {"ok": True}
 
-        # IA -> JSON
-        json_str = extrair_os(openai_client, texto)
-        data = json.loads(json_str)
+        chat_id = str(message["chat"]["id"])
+        text = _normalize_text(message.get("text", ""))
 
-        # Normaliza/valida
-        wo = WorkOrder.from_ai_dict(data)
+        st = get_or_create_chat_state(db, chat_id)
 
-        # Salva OS e pega ID
-        row = save_work_order(db, chat_id, wo, texto)
+        # --- Comandos / Menu ---
+        if text in ("/opcoes", "/opções", "/menu", "Consultar OS"):
+            send_message(chat_id, "Menu:", reply_markup=menu)
+            return {"ok": True}
 
-        # Responde com OS #id
-        reply = format_os_message(wo, row.id)
-        send_message(chat_id, reply)
+        if text in ("/abrir", "Abrir OS"):
+            set_state(db, st, mode="OPEN_FLOW", step="ASK_EQUIP", os_id=None)
+            send_message(chat_id, "Ok. Vamos abrir uma OS.\n\nInforme o equipamento/TAG:", reply_markup=menu)
+            return {"ok": True}
 
-    except Exception as e:
-        send_message(chat_id, f"Erro ao interpretar/salvar OS: {e}")
+        if text in ("/fechar", "Fechar OS"):
+            abertas = list_open_work_orders(db, chat_id, limit=10)
+            if not abertas:
+                send_message(chat_id, "Não encontrei OS abertas para fechar.", reply_markup=menu)
+                return {"ok": True}
+
+            items = []
+            for wo in abertas:
+                resumo = f"{wo.equipamento} - {wo.descricao_do_problema[:40].strip()}"
+                items.append((wo.id, resumo))
+
+            send_message(chat_id, "Selecione a OS para fechar:", reply_markup=close_os_inline_keyboard(items))
+            return {"ok": True}
+
+        # --- Fluxo de ABERTURA ---
+        if st.mode == "OPEN_FLOW":
+            if st.step == "ASK_EQUIP":
+                st.temp_equipamento = text
+                db.commit()
+                set_state(db, st, mode="OPEN_FLOW", step="ASK_SETOR")
+                send_message(chat_id, "Informe o setor (obrigatório):", reply_markup=menu)
+                return {"ok": True}
+
+            if st.step == "ASK_SETOR":
+                if not text:
+                    send_message(chat_id, "Setor é obrigatório. Informe o setor:", reply_markup=menu)
+                    return {"ok": True}
+
+                st.temp_setor = text
+                db.commit()
+                set_state(db, st, mode="OPEN_FLOW", step="ASK_PROBLEMA")
+                send_message(chat_id, "Descreva o problema / serviço solicitado:", reply_markup=menu)
+                return {"ok": True}
+
+            if st.step == "ASK_PROBLEMA":
+                st.temp_problema = text
+                db.commit()
+                set_state(db, st, mode="OPEN_FLOW", step="ASK_PARADA")
+                send_message(chat_id, "A máquina está parada? Responda: SIM ou NÃO", reply_markup=menu)
+                return {"ok": True}
+
+            if st.step == "ASK_PARADA":
+                val = text.upper()
+                if val not in ("SIM", "NAO", "NÃO"):
+                    send_message(chat_id, "Resposta inválida. Digite SIM ou NÃO:", reply_markup=menu)
+                    return {"ok": True}
+                if val == "NÃO":
+                    val = "NAO"
+
+                st.temp_maquina_parada = val
+                db.commit()
+
+                wo = create_open_work_order(
+                    db,
+                    chat_id=chat_id,
+                    equipamento=st.temp_equipamento,
+                    setor=st.temp_setor,
+                    problema=st.temp_problema,
+                    maquina_parada=st.temp_maquina_parada,
+                )
+
+                clear_state(db, st)
+
+                send_message(
+                    chat_id,
+                    f"✅ OS #{wo.id} ABERTA\n\n"
+                    f"Equipamento: {wo.equipamento}\n"
+                    f"Setor: {wo.setor}\n"
+                    f"Parada: {wo.maquina_parada}\n"
+                    f"Problema: {wo.descricao_do_problema}",
+                    reply_markup=menu,
+                )
+                return {"ok": True}
+
+        # --- Fluxo de FECHAMENTO COMPLETO ---
+        if st.mode == "CLOSE_FLOW":
+            os_id = st.os_id
+
+            if st.step == "ASK_SOLUCAO":
+                st.temp_solucao = text
+                db.commit()
+                set_state(db, st, mode="CLOSE_FLOW", step="ASK_INICIO", os_id=os_id)
+
+                send_message(
+                    chat_id,
+                    "Informe a hora de INÍCIO (HH:MM).\n"
+                    "Se o serviço passou de 1 dia, você pode informar o tempo total assim:\n"
+                    "TOTAL 3h  (ou TOTAL 180)",
+                    reply_markup=menu,
+                )
+                return {"ok": True}
+
+            if st.step == "ASK_INICIO":
+                # opção: total direto
+                total_min = _parse_total_duration_minutes(text)
+                if total_min is not None:
+                    st.temp_inicio_hhmm = ""
+                    st.temp_fim_hhmm = ""
+                    db.commit()
+
+                    # guarda o total direto em tempo_gasto_minutos (vamos passar mais tarde)
+                    # segue para técnicos
+                    set_state(db, st, mode="CLOSE_FLOW", step="ASK_TECNICOS", os_id=os_id)
+                    # guardaremos o total no campo temp_fim_hhmm usando um truque simples? melhor não.
+                    # vamos usar temp_inicio_hhmm = f"TOTAL:{min}"
+                    st.temp_inicio_hhmm = f"TOTAL:{total_min}"
+                    db.commit()
+
+                    send_message(
+                        chat_id,
+                        "Informe o(s) técnico(s) (separe por vírgula se tiver mais de um). Ex: Marcos, João",
+                        reply_markup=menu,
+                    )
+                    return {"ok": True}
+
+                # senão, esperar HH:MM
+                inicio_min = _parse_hhmm(text)
+                if inicio_min is None:
+                    send_message(chat_id, "Formato inválido. Envie HH:MM (ex: 08:10) ou TOTAL 3h:", reply_markup=menu)
+                    return {"ok": True}
+
+                st.temp_inicio_hhmm = text
+                db.commit()
+                set_state(db, st, mode="CLOSE_FLOW", step="ASK_FIM", os_id=os_id)
+                send_message(chat_id, "Informe a hora de TÉRMINO (HH:MM):", reply_markup=menu)
+                return {"ok": True}
+
+            if st.step == "ASK_FIM":
+                fim_min = _parse_hhmm(text)
+                if fim_min is None:
+                    send_message(chat_id, "Formato inválido. Envie HH:MM (ex: 09:40):", reply_markup=menu)
+                    return {"ok": True}
+
+                st.temp_fim_hhmm = text
+                db.commit()
+                set_state(db, st, mode="CLOSE_FLOW", step="ASK_TECNICOS", os_id=os_id)
+                send_message(
+                    chat_id,
+                    "Informe o(s) técnico(s) (separe por vírgula se tiver mais de um). Ex: Marcos, João",
+                    reply_markup=menu,
+                )
+                return {"ok": True}
+
+            if st.step == "ASK_TECNICOS":
+                st.temp_tecnicos = text
+                db.commit()
+                set_state(db, st, mode="CLOSE_FLOW", step="ASK_CUSTO", os_id=os_id)
+                send_message(
+                    chat_id,
+                    "Informe o custo de peças (opcional). Pode ser 0. Ex: 50,30\n"
+                    "Se não souber, envie 0.",
+                    reply_markup=menu,
+                )
+                return {"ok": True}
+
+            if st.step == "ASK_CUSTO":
+                custo = _safe_float_string(text)
+                st.temp_custo_pecas = custo
+                db.commit()
+
+                # calcular tempo em minutos
+                tempo_min = None
+
+                # caso TOTAL
+                if st.temp_inicio_hhmm.startswith("TOTAL:"):
+                    try:
+                        tempo_min = int(st.temp_inicio_hhmm.split(":", 1)[1])
+                    except Exception:
+                        tempo_min = None
+                else:
+                    inicio_min = _parse_hhmm(st.temp_inicio_hhmm)
+                    fim_min = _parse_hhmm(st.temp_fim_hhmm)
+
+                    if inicio_min is None or fim_min is None:
+                        tempo_min = None
+                    else:
+                        # se cruzou meia-noite, soma 24h
+                        if fim_min < inicio_min:
+                            fim_min += 24 * 60
+                        tempo_min = fim_min - inicio_min
+
+                if tempo_min is None:
+                    tempo_min = 0
+
+                # Fechar no banco
+                wo = close_work_order(
+                    db,
+                    chat_id=chat_id,
+                    os_id=os_id,
+                    solucao=st.temp_solucao,
+                    tempo_min=tempo_min,
+                    custo_pecas=st.temp_custo_pecas,
+                )
+
+                # OBS: por enquanto técnicos ficam apenas na conversa (não salvamos no DB ainda).
+                tecnicos = st.temp_tecnicos.strip() if st.temp_tecnicos.strip() else "SEM INFORMAÇÃO"
+
+                clear_state(db, st)
+
+                send_message(
+                    chat_id,
+                    f"✅ OS #{wo.id} FECHADA\n\n"
+                    f"Equipamento: {wo.equipamento}\n"
+                    f"Setor: {wo.setor}\n"
+                    f"Tempo (min): {wo.tempo_gasto_minutos}\n"
+                    f"Custo peças: {wo.custo_pecas}\n"
+                    f"Técnicos: {tecnicos}\n"
+                    f"Solução: {wo.solucao_aplicada}",
+                    reply_markup=menu,
+                )
+                return {"ok": True}
+
+        # fallback
+        send_message(chat_id, "Comando não reconhecido. Use o menu.", reply_markup=menu)
+        return {"ok": True}
+
     finally:
         db.close()
-
-    return {"ok": True}
