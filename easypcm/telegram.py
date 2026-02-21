@@ -1,41 +1,72 @@
+# easypcm/telegram.py
+import os
 import requests
-from .config import TELEGRAM_BOT_TOKEN
 
-BASE_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+from .ui_labels import (
+    BTN_OPEN, BTN_UPDATE, BTN_CLOSE, BTN_CONSULT,
+    CB_CLOSE_PREFIX, CB_UPDATE_PREFIX, CB_STATUS_PREFIX,
+    STATUS_OPTIONS,
+)
 
 
 def send_message(chat_id: str, text: str, reply_markup: dict | None = None) -> None:
-    url = f"{BASE_URL}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text}
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+
+    if not token:
+        print("ERRO: TELEGRAM_BOT_TOKEN não carregado (None). Verifique .env e load_dotenv().")
+        return
+
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+    }
     if reply_markup:
         payload["reply_markup"] = reply_markup
-    requests.post(url, json=payload, timeout=30)
+
+    r = requests.post(url, json=payload, timeout=20)
+    print("sendMessage:", r.status_code, r.text[:200])
 
 
 def main_menu_keyboard() -> dict:
-    """
-    Botões sempre visíveis (Reply Keyboard).
-    """
     return {
         "keyboard": [
-            [{"text": "Abrir OS"}],
-            [{"text": "Fechar OS"}],
-            [{"text": "Consultar OS"}],
+            [BTN_OPEN, BTN_UPDATE],
+            [BTN_CLOSE, BTN_CONSULT],
         ],
         "resize_keyboard": True,
-        "one_time_keyboard": False,
         "is_persistent": True,
+        "one_time_keyboard": False,
+        "input_field_placeholder": "Escolha uma opção abaixo",
     }
 
 
 def close_os_inline_keyboard(items: list[tuple[int, str]]) -> dict:
-    """
-    Inline keyboard para lista de OS abertas.
-    items: [(os_id, resumo), ...]
-    callback_data: "close:<id>"
-    """
     buttons = []
     for os_id, resumo in items:
-        buttons.append([{"text": f"Fechar #{os_id} - {resumo}", "callback_data": f"close:{os_id}"}])
+        buttons.append([{
+            "text": f"#{os_id} - {resumo}",
+            "callback_data": f"{CB_CLOSE_PREFIX}{os_id}",
+        }])
+    return {"inline_keyboard": buttons}
 
+
+def update_os_inline_keyboard(items: list[tuple[int, str]]) -> dict:
+    buttons = []
+    for os_id, resumo in items:
+        buttons.append([{
+            "text": f"#{os_id} - {resumo}",
+            "callback_data": f"{CB_UPDATE_PREFIX}{os_id}",
+        }])
+    return {"inline_keyboard": buttons}
+
+
+def status_inline_keyboard() -> dict:
+    buttons = []
+    for label, value in STATUS_OPTIONS:
+        buttons.append([{
+            "text": label,
+            "callback_data": f"{CB_STATUS_PREFIX}{value}",
+        }])
     return {"inline_keyboard": buttons}

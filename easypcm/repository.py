@@ -36,19 +36,20 @@ def clear_state(db: Session, st: ChatState) -> ChatState:
     st.step = ""
     st.os_id = None
 
-    # abertura
     st.temp_equipamento = ""
     st.temp_setor = ""
     st.temp_problema = ""
     st.temp_maquina_parada = ""
 
-    # fechamento
     st.temp_solucao = ""
     st.temp_inicio_hhmm = ""
     st.temp_fim_hhmm = ""
     st.temp_tecnicos = ""
     st.temp_materiais = ""
     st.temp_custo_pecas = ""
+
+    st.temp_status = ""
+    st.temp_status_obs = ""
 
     db.commit()
     db.refresh(st)
@@ -81,7 +82,7 @@ def create_open_work_order(
 def list_open_work_orders(db: Session, chat_id: str, limit: int = 10) -> list[WorkOrderRow]:
     return (
         db.query(WorkOrderRow)
-        .filter(WorkOrderRow.chat_id == chat_id, WorkOrderRow.status == "ABERTA")
+        .filter(WorkOrderRow.chat_id == chat_id, WorkOrderRow.status != "FECHADA")
         .order_by(desc(WorkOrderRow.id))
         .limit(limit)
         .all()
@@ -101,8 +102,7 @@ def add_materials(db: Session, os_id: int, materiais: list[str]) -> None:
         desc_txt = (m or "").strip()
         if not desc_txt:
             continue
-        row = MaterialRow(work_order_id=os_id, descricao=desc_txt)
-        db.add(row)
+        db.add(MaterialRow(work_order_id=os_id, descricao=desc_txt))
     db.commit()
 
 
@@ -118,11 +118,8 @@ def list_materials(db: Session, os_id: int) -> list[MaterialRow]:
 def _get_or_create_technician(db: Session, nome: str) -> TechnicianRow:
     nome_norm = (nome or "").strip()
     if not nome_norm:
-        # não cria vazio
         raise ValueError("Nome de técnico vazio.")
 
-    # padrão simples: capitaliza primeiras letras (ajuda um pouco)
-    # (no futuro: mapa de nomes/sinônimos)
     nome_norm = " ".join([p[:1].upper() + p[1:].lower() for p in nome_norm.split()])
 
     tech = db.query(TechnicianRow).filter(TechnicianRow.nome == nome_norm).first()
@@ -137,12 +134,7 @@ def _get_or_create_technician(db: Session, nome: str) -> TechnicianRow:
 
 
 def add_technicians_to_os(db: Session, os_id: int, nomes: list[str]) -> list[str]:
-    """
-    Cria técnicos se necessário e cria vínculo OS <-> técnico.
-    Retorna a lista de nomes normalizados gravados.
-    """
     saved_names: list[str] = []
-
     for nome in nomes:
         nome_clean = (nome or "").strip()
         if not nome_clean:
@@ -150,7 +142,6 @@ def add_technicians_to_os(db: Session, os_id: int, nomes: list[str]) -> list[str
 
         tech = _get_or_create_technician(db, nome_clean)
 
-        # evitar duplicado
         exists = (
             db.query(WorkOrderTechnicianRow)
             .filter(
@@ -196,6 +187,26 @@ def close_work_order(
     wo.custo_pecas = custo_pecas or SEM_INFO
     wo.status = "FECHADA"
     wo.fechamento_em = datetime.now(timezone.utc)
+
+    db.commit()
+    db.refresh(wo)
+    return wo
+
+
+def update_work_order_status(
+    db: Session,
+    chat_id: str,
+    os_id: int,
+    status: str,
+    observacao: str,
+) -> WorkOrderRow:
+    wo = get_work_order(db, chat_id, os_id)
+    if not wo:
+        raise ValueError("OS não encontrada.")
+
+    wo.status = status
+    wo.status_observacao = (observacao or "").strip()
+    wo.status_updated_at = datetime.now(timezone.utc)
 
     db.commit()
     db.refresh(wo)

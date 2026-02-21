@@ -3,4 +3,14 @@
     *Em fechar, pode apenas inserir, descrição do serviço executado, material utilizado, valor do material, hora de inicio e término, nome do técnico
 *Permitir + de 1 técnico por OS
 *Criar mapa de TAGS, nomes de técnico, setores e afins
+*Cálculos e definições necessários fora do input de dados:
+	*Tipo de serviço, elétrico, mecânico, predial, outros
+	*Horas trabalhadas com base no inicio e término
+	*Carga total de trabalho (Quantidade de pssoas x tempo total da OS)
+	*Dias de espera (O tempo que a OS ficou aberta) Data fechamento - Data abertura
+	*Quantidade de pessoas utilizadas
+	*Custo da Hora técnica (Valor pré-fixado de hora técnica * carga total de trabalho)
+	*Se houve ou não parada de máquina
+	*Tempo de parada de produção (Se houve parada, guardar o tempo de fechamento - tempo de abertura)
+	*Total dos serviços, custa da Hora técnica total da OS + Valor de material
 * Através do telegram, buscar OS e modificar algum dado. EX: Buscar OS 4 e mudar status
