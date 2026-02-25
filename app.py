@@ -3,6 +3,7 @@ load_dotenv()
 
 from fastapi import FastAPI, Request
 
+from easypcm.config import MASTER_USER_ID, INVITE_EXPIRES_DAYS
 from easypcm.db import engine, SessionLocal
 from easypcm.models import Base
 from easypcm.telegram import (
@@ -13,6 +14,15 @@ from easypcm.telegram import (
     status_inline_keyboard,
 )
 from easypcm.repository import (
+    register_event_if_new,
+    upsert_user,
+    create_organization,
+    get_org_by_id,
+    get_user_org_id,
+    get_user_role_in_org,
+    create_invite,
+    consume_invite,
+
     get_or_create_chat_state,
     set_state,
     clear_state,
@@ -35,6 +45,7 @@ from easypcm.ui_texts import TXT
 
 app = FastAPI()
 Base.metadata.create_all(bind=engine)
+
 
 @app.get("/health")
 def health():
@@ -114,21 +125,80 @@ def _parse_technicians_list(text: str) -> list[str]:
     return [p for p in parts if p]
 
 
+def _is_private_chat(message: dict) -> bool:
+    chat = message.get("chat", {})
+    return chat.get("type") == "private"
+
+
+def _parse_command(text: str) -> tuple[str, str]:
+    """
+    Retorna (cmd, arg)
+    Ex:
+      "/entrar INV-ABC123" -> ("/entrar", "INV-ABC123")
+      "/criar_empresa Minha Empresa" -> ("/criar_empresa", "Minha Empresa")
+    """
+    t = (text or "").strip()
+    if not t.startswith("/"):
+        return ("", "")
+    parts = t.split(" ", 1)
+    cmd = parts[0].strip().lower()
+    arg = parts[1].strip() if len(parts) > 1 else ""
+    return (cmd, arg)
+
+
 @app.post("/telegram/webhook")
 async def telegram_webhook(request: Request):
     update = await request.json()
     db = SessionLocal()
 
     try:
+        # =====================================================
+        # DEDUP (ANTI-FLOOD) por update_id
+        # =====================================================
+        update_id = update.get("update_id")
+        dedup_key = f"upd:{update_id}" if update_id is not None else None
+
+        chat_id_for_event = ""
+        if "callback_query" in update:
+            cb0 = update["callback_query"]
+            chat_id_for_event = str(cb0["message"]["chat"]["id"])
+        else:
+            msg0 = update.get("message") or update.get("edited_message")
+            if msg0:
+                chat_id_for_event = str(msg0["chat"]["id"])
+
+        if dedup_key:
+            is_new = register_event_if_new(db, dedup_key, chat_id_for_event, update)
+            if not is_new:
+                return {"ok": True}
+
         menu = main_menu_keyboard()
 
-        # ========== CALLBACK ==========
+        # =====================================================
+        # CALLBACKS (inline buttons)
+        # =====================================================
         if "callback_query" in update:
             cb = update["callback_query"]
-            chat_id = str(cb["message"]["chat"]["id"])
+            message = cb.get("message", {})
+            chat_id = str(message.get("chat", {}).get("id", ""))
             data = cb.get("data", "")
 
+            # callbacks devem funcionar só no privado
+            # (se quiser permitir grupo depois, a gente adapta)
             st = get_or_create_chat_state(db, chat_id)
+
+            # Identidade do usuário
+            from_user = cb.get("from", {})
+            telegram_user_id = str(from_user.get("id", ""))
+            username = from_user.get("username", "") or ""
+            first_name = from_user.get("first_name", "") or ""
+            is_master = (telegram_user_id == str(MASTER_USER_ID))
+            upsert_user(db, telegram_user_id, username=username, first_name=first_name, is_master=is_master)
+
+            org_id = get_user_org_id(db, telegram_user_id)
+            if not org_id:
+                send_message(chat_id, "Você ainda não está em uma empresa. Use: /entrar SEU-CÓDIGO", reply_markup=menu)
+                return {"ok": True}
 
             # Fechar OS: escolha da OS
             if data.startswith(CB_CLOSE_PREFIX):
@@ -160,17 +230,148 @@ async def telegram_webhook(request: Request):
             send_message(chat_id, TXT.UNKNOWN_ACTION, reply_markup=menu)
             return {"ok": True}
 
-        # ========== MESSAGE ==========
+        # =====================================================
+        # MESSAGES
+        # =====================================================
         message = update.get("message") or update.get("edited_message")
         if not message:
             return {"ok": True}
 
         chat_id = str(message["chat"]["id"])
+        chat_type = message.get("chat", {}).get("type", "")
         text = _normalize_text(message.get("text", ""))
+
+        # Identidade do usuário
+        from_user = message.get("from", {})
+        telegram_user_id = str(from_user.get("id", ""))
+        username = from_user.get("username", "") or ""
+        first_name = from_user.get("first_name", "") or ""
+        is_master = (telegram_user_id == str(MASTER_USER_ID))
+        upsert_user(db, telegram_user_id, username=username, first_name=first_name, is_master=is_master)
+
+        # A partir de agora, a UX alvo é PRIVADO
+        if chat_type != "private":
+            send_message(
+                chat_id,
+                "Para manter privacidade e organização, use o bot no PRIVADO.\n"
+                "Abra uma conversa comigo e use /menu.\n\n"
+                "Se precisar entrar em uma empresa: /entrar SEU-CÓDIGO",
+                reply_markup=menu,
+            )
+            return {"ok": True}
 
         st = get_or_create_chat_state(db, chat_id)
 
-        # Menu/comandos
+        # =====================================================
+        # COMANDOS DE ORG/INVITE
+        # =====================================================
+        cmd, arg = _parse_command(text)
+
+        if cmd == "/entrar":
+            token = (arg or "").strip()
+            if not token:
+                send_message(chat_id, "Uso: /entrar INV-XXXXXX", reply_markup=menu)
+                return {"ok": True}
+
+            ok, msg, org_id, role = consume_invite(db, token, telegram_user_id)
+            if not ok:
+                send_message(chat_id, msg, reply_markup=menu)
+                return {"ok": True}
+
+            org = get_org_by_id(db, org_id) if org_id else None
+            org_name = org.name if org else "Empresa"
+            send_message(chat_id, f"{msg}\n\nEmpresa: {org_name}\nPerfil: {role}", reply_markup=menu)
+            return {"ok": True}
+
+        if cmd == "/criar_empresa":
+            if not is_master:
+                send_message(chat_id, "Sem permissão. Apenas o MASTER pode criar empresas.", reply_markup=menu)
+                return {"ok": True}
+
+            name = (arg or "").strip().strip('"')
+            if not name:
+                send_message(chat_id, 'Uso: /criar_empresa "Nome da Empresa"', reply_markup=menu)
+                return {"ok": True}
+
+            org = create_organization(db, name)
+            send_message(chat_id, f"Empresa criada!\nID: {org.id}\nNome: {org.name}", reply_markup=menu)
+            send_message(chat_id, f"Agora gere o convite do admin:\n/invite_admin {org.id}", reply_markup=menu)
+            return {"ok": True}
+
+        if cmd == "/invite_admin":
+            if not is_master:
+                send_message(chat_id, "Sem permissão. Apenas o MASTER pode criar convite de admin.", reply_markup=menu)
+                return {"ok": True}
+
+            if not arg or not arg.strip().isdigit():
+                send_message(chat_id, "Uso: /invite_admin <ORG_ID>", reply_markup=menu)
+                return {"ok": True}
+
+            org_id = int(arg.strip())
+            org = get_org_by_id(db, org_id)
+            if not org or not org.active:
+                send_message(chat_id, "Empresa não encontrada.", reply_markup=menu)
+                return {"ok": True}
+
+            inv = create_invite(
+                db,
+                org_id=org_id,
+                created_by_user_id=telegram_user_id,
+                role_to_grant="ORG_ADMIN",
+                expires_days=INVITE_EXPIRES_DAYS,
+            )
+            send_message(
+                chat_id,
+                f"Convite de ADMIN criado (expira em {INVITE_EXPIRES_DAYS} dias):\n\n{inv.token}\n\n"
+                f"Envie este código para o admin da empresa.",
+                reply_markup=menu,
+            )
+            return {"ok": True}
+
+        if cmd == "/invite_user":
+            # precisa ser admin da org
+            org_id = get_user_org_id(db, telegram_user_id)
+            if not org_id:
+                send_message(chat_id, "Você ainda não está em uma empresa. Use: /entrar SEU-CÓDIGO", reply_markup=menu)
+                return {"ok": True}
+
+            role = get_user_role_in_org(db, telegram_user_id, org_id)
+            if role != "ORG_ADMIN":
+                send_message(chat_id, "Sem permissão. Apenas ADMIN da empresa pode convidar usuários.", reply_markup=menu)
+                return {"ok": True}
+
+            inv = create_invite(
+                db,
+                org_id=org_id,
+                created_by_user_id=telegram_user_id,
+                role_to_grant="ORG_USER",
+                expires_days=INVITE_EXPIRES_DAYS,
+            )
+            send_message(
+                chat_id,
+                f"Convite de USUÁRIO criado (expira em {INVITE_EXPIRES_DAYS} dias):\n\n{inv.token}\n\n"
+                f"Envie este código para a pessoa entrar com /entrar {inv.token}",
+                reply_markup=menu,
+            )
+            return {"ok": True}
+
+        # =====================================================
+        # BLOQUEIO: precisa estar em uma empresa para usar /menu e fluxos
+        # =====================================================
+        org_id = get_user_org_id(db, telegram_user_id)
+        if not org_id:
+            send_message(
+                chat_id,
+                "Você ainda não está em uma empresa.\n\n"
+                "Use: /entrar INV-XXXXXX\n\n"
+                "Se você é o MASTER, crie uma empresa com:\n/criar_empresa \"Nome\"",
+                reply_markup=menu,
+            )
+            return {"ok": True}
+
+        # =====================================================
+        # MENU / COMANDOS EXISTENTES
+        # =====================================================
         if text in (CMD_MENU_1, CMD_MENU_2, CMD_MENU_3, BTN_CONSULT):
             send_message(chat_id, TXT.MENU_TITLE, reply_markup=menu)
             return {"ok": True}
@@ -181,7 +382,7 @@ async def telegram_webhook(request: Request):
             return {"ok": True}
 
         if text in (CMD_CLOSE, BTN_CLOSE):
-            abertas = list_open_work_orders(db, chat_id, limit=10)
+            abertas = list_open_work_orders(db, org_id, limit=10)
             if not abertas:
                 send_message(chat_id, TXT.NO_OPEN_OS_TO_CLOSE, reply_markup=menu)
                 return {"ok": True}
@@ -195,7 +396,7 @@ async def telegram_webhook(request: Request):
             return {"ok": True}
 
         if text in (CMD_UPDATE, BTN_UPDATE):
-            abertas = list_open_work_orders(db, chat_id, limit=10)
+            abertas = list_open_work_orders(db, org_id, limit=10)
             if not abertas:
                 send_message(chat_id, TXT.NO_OPEN_OS_TO_UPDATE, reply_markup=menu)
                 return {"ok": True}
@@ -208,7 +409,9 @@ async def telegram_webhook(request: Request):
             send_message(chat_id, TXT.UPDATE_PICK_OS, reply_markup=update_os_inline_keyboard(items))
             return {"ok": True}
 
-        # ========== OPEN_FLOW ==========
+        # =====================================================
+        # OPEN_FLOW
+        # =====================================================
         if st.mode == "OPEN_FLOW":
             if st.step == "ASK_EQUIP":
                 st.temp_equipamento = text
@@ -248,6 +451,7 @@ async def telegram_webhook(request: Request):
 
                 wo = create_open_work_order(
                     db,
+                    org_id=org_id,
                     chat_id=chat_id,
                     equipamento=st.temp_equipamento,
                     setor=st.temp_setor,
@@ -263,17 +467,20 @@ async def telegram_webhook(request: Request):
                 )
                 return {"ok": True}
 
-        # ========== UPDATE_FLOW ==========
+        # =====================================================
+        # UPDATE_FLOW
+        # =====================================================
         if st.mode == "UPDATE_FLOW":
-            # aqui só esperamos OBS (o status vem via callback)
             if st.step == "ASK_OBS":
                 obs = "" if text.upper() == "PULAR" else text
-                wo = update_work_order_status(db, chat_id, st.os_id, st.temp_status, obs)
+                wo = update_work_order_status(db, org_id, st.os_id, st.temp_status, obs)
                 clear_state(db, st)
                 send_message(chat_id, TXT.update_done(wo.id, wo.status, wo.status_observacao), reply_markup=menu)
                 return {"ok": True}
 
-        # ========== CLOSE_FLOW ==========
+        # =====================================================
+        # CLOSE_FLOW
+        # =====================================================
         if st.mode == "CLOSE_FLOW":
             os_id = st.os_id
 
@@ -335,7 +542,6 @@ async def telegram_webhook(request: Request):
                 st.temp_custo_pecas = _safe_float_string(text)
                 db.commit()
 
-                # tempo em minutos
                 tempo_min = 0
                 if st.temp_inicio_hhmm.startswith("TOTAL:"):
                     try:
@@ -350,20 +556,17 @@ async def telegram_webhook(request: Request):
                             fim_min += 24 * 60
                         tempo_min = max(0, fim_min - inicio_min)
 
-                # técnicos N:N
                 tech_names = _parse_technicians_list(st.temp_tecnicos)
                 if tech_names:
                     add_technicians_to_os(db, os_id, tech_names)
 
-                # materiais
                 materiais = _parse_materials_list(st.temp_materiais)
                 if materiais:
                     add_materials(db, os_id, materiais)
 
-                # fechar
                 wo = close_work_order(
                     db,
-                    chat_id=chat_id,
+                    org_id=org_id,
                     os_id=os_id,
                     solucao=st.temp_solucao,
                     tempo_min=tempo_min,
