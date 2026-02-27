@@ -25,7 +25,15 @@ class TXT:
     # Fechamento
     @staticmethod
     def close_intro(os_id: int) -> str:
-        return f"Ok. Vamos fechar a OS #{os_id}.\n\nDescreva o serviço executado / solução aplicada:"
+        # first prompt in the close flow: ask for execution date
+        return (
+            f"Ok. Vamos fechar a OS #{os_id}.\n\n"
+            "Escreva HOJE ou coloque a data no formato DD/MM/AAAA."
+        )
+
+    CLOSE_ASK_SOLUCAO = (
+        "Descreva o serviço executado / solução aplicada:"
+    )
 
     CLOSE_ASK_INICIO = (
         "Informe a hora de INÍCIO (HH:MM).\n"
@@ -41,15 +49,20 @@ class TXT:
         "Ex: Rolamento, Retentor 45mm, Graxa\n"
         "Se não houve peças, digite: NENHUMA"
     )
+    CLOSE_DATE_INVALID = (
+        "Formato inválido. Envie HOJE ou DD/MM/AAAA (ex: 26/02/2026)."
+    )
+
     CLOSE_ASK_CUSTO = (
         "Informe o custo de peças em Reais(opcional). Pode ser 0. Ex: 50\n"
         "Se não souber, envie 0."
     )
 
     @staticmethod
-    def close_done(os_id: int, equipamento: str, setor: str, tempo_min: str, tecnicos: str, pecas: str, custo: str, solucao: str) -> str:
+    def close_done(os_id: int, equipamento: str, setor: str, data_fechamento: str, tempo_min: str, tecnicos: str, pecas: str, custo: str, solucao: str) -> str:
         return (
             f"✅ OS #{os_id} FECHADA\n\n"
+            f"Data execução: {data_fechamento}\n"
             f"Equipamento: {equipamento}\n"
             f"Setor: {setor}\n"
             f"Tempo (min): {tempo_min}\n"

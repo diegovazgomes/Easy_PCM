@@ -259,6 +259,7 @@ def clear_state(db: Session, st: ChatState) -> ChatState:
     st.temp_tecnicos = ""
     st.temp_materiais = ""
     st.temp_custo_pecas = ""
+    st.temp_fechamento_data = ""
 
     st.temp_status = ""
     st.temp_status_obs = ""
@@ -395,6 +396,7 @@ def close_work_order(
     solucao: str,
     tempo_min: int,
     custo_pecas: str,
+    fechamento_em: datetime | None = None,
 ) -> WorkOrderRow:
     wo = get_work_order(db, org_id, os_id)
     if not wo:
@@ -404,7 +406,8 @@ def close_work_order(
     wo.tempo_gasto_minutos = str(tempo_min)
     wo.custo_pecas = custo_pecas or SEM_INFO
     wo.status = "FECHADA"
-    wo.fechamento_em = datetime.now(timezone.utc)
+    # use provided date or fallback to now
+    wo.fechamento_em = fechamento_em or datetime.now(timezone.utc)
 
     db.commit()
     db.refresh(wo)

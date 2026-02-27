@@ -6,6 +6,8 @@ from fastapi import FastAPI, Request
 from easypcm.config import MASTER_USER_ID, INVITE_EXPIRES_DAYS
 from easypcm.db import engine, SessionLocal
 from easypcm.models import Base
+
+from datetime import datetime, timezone
 from easypcm.telegram import (
     send_message,
     main_menu_keyboard,
@@ -93,6 +95,25 @@ def _parse_total_duration_minutes(text: str) -> int | None:
         if num.isdigit():
             return int(num) * 60
     return None
+
+
+def _parse_date(text: str) -> datetime | None:
+    """Retorna datetime UTC para 'HOJE' ou data no formato DD/MM/AAAA.
+    Caso inválido, retorna None.
+    """
+    t = (text or "").strip().lower()
+    if not t:
+        return None
+    if t == "hoje":
+        return datetime.now(timezone.utc)
+
+    # tentar DD/MM/AAAA
+    try:
+        dt = datetime.strptime(text, "%d/%m/%Y")
+        # assumimos UTC
+        return dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
 
 
 def _safe_float_string(text: str) -> str:
@@ -203,7 +224,12 @@ async def telegram_webhook(request: Request):
             # Fechar OS: escolha da OS
             if data.startswith(CB_CLOSE_PREFIX):
                 os_id = int(data.split(":", 1)[1])
-                set_state(db, st, mode="CLOSE_FLOW", step="ASK_SOLUCAO", os_id=os_id)
+                # start a fresh close flow (wipe any leftover temp fields)
+                clear_state(db, st)
+                st.temp_fechamento_data = ""
+                db.commit()
+
+                set_state(db, st, mode="CLOSE_FLOW", step="ASK_DATE", os_id=os_id)
                 send_message(chat_id, TXT.close_intro(os_id), reply_markup=menu)
                 return {"ok": True}
 
@@ -484,6 +510,17 @@ async def telegram_webhook(request: Request):
         if st.mode == "CLOSE_FLOW":
             os_id = st.os_id
 
+            if st.step == "ASK_DATE":
+                dt = _parse_date(text)
+                if dt is None:
+                    send_message(chat_id, TXT.CLOSE_DATE_INVALID, reply_markup=menu)
+                    return {"ok": True}
+                st.temp_fechamento_data = dt.isoformat()
+                db.commit()
+                set_state(db, st, mode="CLOSE_FLOW", step="ASK_SOLUCAO", os_id=os_id)
+                send_message(chat_id, TXT.CLOSE_ASK_SOLUCAO, reply_markup=menu)
+                return {"ok": True}
+
             if st.step == "ASK_SOLUCAO":
                 st.temp_solucao = text
                 db.commit()
@@ -564,6 +601,14 @@ async def telegram_webhook(request: Request):
                 if materiais:
                     add_materials(db, os_id, materiais)
 
+                # determine closing datetime from stored string
+                fech_dt = None
+                if st.temp_fechamento_data:
+                    try:
+                        fech_dt = datetime.fromisoformat(st.temp_fechamento_data)
+                    except Exception:
+                        fech_dt = None
+
                 wo = close_work_order(
                     db,
                     org_id=org_id,
@@ -571,6 +616,7 @@ async def telegram_webhook(request: Request):
                     solucao=st.temp_solucao,
                     tempo_min=tempo_min,
                     custo_pecas=st.temp_custo_pecas,
+                    fechamento_em=fech_dt,
                 )
 
                 techs_db = list_technicians_for_os(db, os_id)
@@ -584,16 +630,23 @@ async def telegram_webhook(request: Request):
                 else:
                     mats_txt = "NENHUMA"
 
+                # formatted date for summary message
+                if fech_dt:
+                    data_txt = fech_dt.astimezone(timezone.utc).strftime("%d/%m/%Y")
+                else:
+                    data_txt = datetime.now(timezone.utc).strftime("%d/%m/%Y")
+
                 clear_state(db, st)
                 send_message(
                     chat_id,
                     TXT.close_done(
                         wo.id, wo.equipamento, wo.setor,
+                        data_txt,
                         wo.tempo_gasto_minutos,
                         tecnicos_txt,
                         mats_txt,
                         wo.custo_pecas,
-                        wo.solucao_aplicada
+                        wo.solucao_aplicada,
                     ),
                     reply_markup=menu,
                 )

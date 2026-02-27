@@ -152,6 +152,9 @@ class ChatState(Base):
     temp_materiais: Mapped[str] = mapped_column(Text, default="")
     temp_custo_pecas: Mapped[str] = mapped_column(String, default="")
 
+    # data de fechamento informada pelo usuário (DD/MM/AAAA ou "HOJE")
+    temp_fechamento_data: Mapped[str] = mapped_column(String, default="")
+
     # atualização
     temp_status: Mapped[str] = mapped_column(String, default="")
     temp_status_obs: Mapped[str] = mapped_column(Text, default="")

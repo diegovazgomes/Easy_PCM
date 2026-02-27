@@ -14,3 +14,5 @@
 	*Tempo de parada de produção (Se houve parada, guardar o tempo de fechamento - tempo de abertura)
 	*Total dos serviços, custa da Hora técnica total da OS + Valor de material
 * Através do telegram, buscar OS e modificar algum dado. EX: Buscar OS 4 e mudar status
+
+*DB: adicionada coluna temp_fechamento_data em chat_states; apague easypcm.db ou use ALTER TABLE antes de reiniciar para evitar erros.
