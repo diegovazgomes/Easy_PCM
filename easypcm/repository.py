@@ -300,7 +300,7 @@ def create_open_work_order(
 def list_open_work_orders(db: Session, org_id: int, limit: int = 10) -> list[WorkOrderRow]:
     return (
         db.query(WorkOrderRow)
-        .filter(WorkOrderRow.org_id == org_id, WorkOrderRow.status != "FECHADA")
+        .filter(WorkOrderRow.org_id == org_id, WorkOrderRow.status.notin_(["FECHADA", "CANCELADA"]))
         .order_by(desc(WorkOrderRow.id))
         .limit(limit)
         .all()

@@ -444,7 +444,7 @@ async def telegram_webhook(request: Request):
                     send_message(chat_id, TXT.PARADA_INVALID, reply_markup=menu)
                     return {"ok": True}
                 if val == "NÃO":
-                    val = "NAO"
+                    val = "NÃO"
 
                 st.temp_maquina_parada = val
                 db.commit()

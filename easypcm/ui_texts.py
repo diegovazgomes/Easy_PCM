@@ -82,6 +82,6 @@ class TXT:
 
     # Gerais
     UNKNOWN_ACTION = "Ação não reconhecida."
-    UNKNOWN_COMMAND = "Comando não reconhecido. Use o menu."
+    UNKNOWN_COMMAND = "Escolha uma opção abaixo ⬇"
     NO_OPEN_OS_TO_CLOSE = "Não encontrei OS abertas para fechar."
     NO_OPEN_OS_TO_UPDATE = "Não encontrei OS abertas para atualizar."
